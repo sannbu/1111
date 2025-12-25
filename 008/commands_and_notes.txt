@@ -1,0 +1,222 @@
+CD-Inpainting (Conditional Diffusion Inpainting) — Çalıştırma Komutları ve Kısa Açıklamalar
+================================================================================
+
+Bu dosya, projeyi GitHub’a koymadan önce biz hangi komutları neden kullandık ve ne işe yarıyorlar, adım adım özetler.
+(Windows / Anaconda env3 örneği üzerinden.)
+
+Önemli Dizin Mantığı
+--------------------
+Projede "relative import" (from .dataset import ...) kullanıldığı için train/sample komutlarını modül olarak çalıştırıyoruz.
+Bu yüzden komutları, cd_inpainting klasörünün bir üst dizininden çalıştırmak en sorunsuzu:
+
+Örnek:
+  Proje kökü:  C:\Users\citir\OneDrive\Masaüstü\008
+  Paket klasörü: C:\Users\citir\OneDrive\Masaüstü\008\cd_inpainting
+
+Komutları çalıştırırken genelde "008" içindeydik:
+  cd C:\Users\citir\OneDrive\Masaüstü\008
+
+1) Ortam / Bağımlılıklar
+------------------------
+(Env zaten vardı; tekrar kurmak isterseniz)
+
+- Yeni conda env:
+  conda create -n env3 python=3.10 -y
+  conda activate env3
+
+- Paketler:
+  pip install torch torchvision pillow numpy
+
+Not: CUDA varsa torch otomatik GPU kullanır (kod içinde cuda kontrolü var).
+
+2) Dataset Klasör Yapısı
+------------------------
+En basit dataset düzeni:
+
+cd_inpainting/
+  data/
+    train/
+      images/
+        img_0001.png
+      labels/
+        img_0001.txt
+
+Kural:
+- images içindeki her resmin adı neyse labels içinde aynı isimde .txt olacak.
+  img_0001.png  ->  img_0001.txt
+
+3) Tek Görüntü + Tek Label ile Hızlı Demo (opsiyonel)
+-----------------------------------------------------
+Amaç: pipeline’ın hatasız çalıştığını görmek.
+
+- Klasörleri oluştur:
+  mkdir cd_inpainting\data\train\images
+  mkdir cd_inpainting\data\train\labels
+
+- Label formatı (YOLO):
+  class_id  x_center  y_center  width  height
+  (x_center,y_center,width,height 0..1 arası normalize)
+
+Örnek label (tek bbox):
+  cd_inpainting/data/train/labels/img_0001.txt
+  3 0.421875 0.484375 0.15625 0.15625
+
+4) Smoke Test (Hızlı Sağlık Kontrolü)
+-------------------------------------
+Amaç: Diffusion + UNet forward/backward shape’leri, temel IO düzgün mü?
+
+Komut:
+  python -m cd_inpainting.utils
+
+Çıktı:
+  cd_inpainting/smoke_test.png
+Bu oluşuyorsa: temel pipeline OK.
+
+Pillow uyarısı (DeprecationWarning) kritik değil; sadece gelecekte "mode" parametresi değişiyor.
+
+5) Train (Eğitim)
+-----------------
+Biz train’i modül olarak çalıştırdık (relative import sebebiyle):
+
+Komut (hız için timesteps=100, tek epoch):
+  python -m cd_inpainting.train ^
+    --images_dir cd_inpainting/data/train/images ^
+    --labels_dir cd_inpainting/data/train/labels ^
+    --out_dir runs/cd_inpainting ^
+    --epochs 1 --batch_size 1 --timesteps 100 --num_workers 0 --seed 42
+
+Tek satır versiyonu (CMD "More?" derdini önler):
+  python -m cd_inpainting.train --images_dir cd_inpainting/data/train/images --labels_dir cd_inpainting/data/train/labels --out_dir runs/cd_inpainting --epochs 1 --batch_size 1 --timesteps 100 --num_workers 0 --seed 42
+
+Ne işe yarar?
+- --images_dir / --labels_dir: dataset yolları
+- --out_dir: checkpoint ve logların kaydedileceği klasör
+- --epochs: eğitim turu sayısı
+- --batch_size: batch boyutu
+- --timesteps: diffusion adım sayısı (paper’da 1000; debug için 100)
+- --seed: tekrarlanabilirlik
+- --num_workers 0: Windows’ta DataLoader işçi sorunlarını azaltır
+
+Beklenen çıktı:
+  runs/cd_inpainting/ckpt_epoch_1.pt
+
+Biz daha sonra 43 epoch’a kadar eğittik:
+  ... --epochs 43 ...
+ve checkpoint:
+  runs/cd_inpainting/ckpt_epoch_43.pt
+
+6) Sample / Inpainting (Üretim)
+-------------------------------
+Amaç: Bir background + label’dan “bbox içini üret, bbox dışını koru” ile çıktı üretmek.
+
+Önce output klasörü:
+  mkdir outputs
+
+Komut (epoch 1 checkpoint ile):
+  python -m cd_inpainting.sample --ckpt runs/cd_inpainting/ckpt_epoch_1.pt --background_image cd_inpainting/data/train/images/img_0001.png --label_txt cd_inpainting/data/train/labels/img_0001.txt --out_image outputs/out.png --timesteps 100 --seed 0
+
+Komut (epoch 43 checkpoint ile):
+  python -m cd_inpainting.sample --ckpt runs/cd_inpainting/ckpt_epoch_43.pt --background_image cd_inpainting/data/train/images/img_0001.png --label_txt cd_inpainting/data/train/labels/img_0001.txt --out_image outputs/out_e43.png --timesteps 100 --seed 0
+
+Ne işe yarar?
+- --ckpt: eğitilmiş model ağırlıkları
+- --background_image: korunacak arka plan
+- --label_txt: bbox ve class bilgisi (mask/condition buradan türetilir)
+- --out_image: üretilen çıktının kaydı
+- --timesteps: sampling adım sayısı (paper 1000, test 100)
+
+7) Condition ve Mask Debug Görselleri (Önerilir)
+------------------------------------------------
+Amaç: “Model gerçekten neye şartlanıyor?” ve “mask doğru mu?” görsel olarak kanıtlamak.
+
+sample.py içinde (cond ve mask hazırlandıktan sonra) şu debug kaydı eklendi:
+  cond_img = cond[0, 0].detach().cpu().numpy()
+  mask_img = mask[0, 0].detach().cpu().numpy()
+  Image.fromarray((cond_img*255).clip(0,255).astype(np.uint8)).save("outputs/debug_cond.png")
+  Image.fromarray((mask_img*255).clip(0,255).astype(np.uint8)).save("outputs/debug_mask.png")
+
+Beklenen:
+- outputs/debug_mask.png: bbox içi beyaz, dışı siyah
+- outputs/debug_cond.png: bbox içi class grisi, dışı siyah
+
+8) “Gerçekten mask dışında sabit mi?” Kanıt Testleri
+----------------------------------------------------
+A) Otomatik fark ölçümü (check_mask.py)
+---------------------------------------
+Amaç: output ile background farkını hesaplayıp, mask dışı farkın çok küçük olduğunu ölçmek.
+
+check_mask.py:
+- bg_path: background
+- out_path: üretilen output (out_e43.png gibi)
+- mask_path: debug_mask.png
+
+Çalıştır:
+  python check_mask.py
+
+Örnek bulgular:
+- mask dışı mean diff ~1, max ~7
+- mask içi mean diff çok daha büyük (~40-200 arası)
+Bu, üretimin pratikte mask içinde gerçekleştiğini gösterir.
+
+B) Mask=0 sanity check (en sert test)
+-------------------------------------
+Amaç: Mask tamamen yoksa (label boşsa) output’un background’a çok yakın olması.
+
+1) label dosyasını boş yap:
+  cd_inpainting/data/train/labels/img_0001.txt  (içini sil, boş kaydet)
+
+2) sample al:
+  python -m cd_inpainting.sample --ckpt runs/cd_inpainting/ckpt_epoch_43.pt --background_image cd_inpainting/data/train/images/img_0001.png --label_txt cd_inpainting/data/train/labels/img_0001.txt --out_image outputs/out_mask0.png --timesteps 100 --seed 0
+
+Beklenen: output background gibi kalır.
+
+Not: mask=0 iken check_mask.py’de inside boş olduğu için istatistik fonksiyonu “EMPTY” gösterecek şekilde güncellendi.
+
+C) Mask=1 sanity check
+----------------------
+Amaç: Mask tüm görüntü olursa her yer değişir.
+
+Label’ı tüm görüntü yap:
+  3 0.5 0.5 1.0 1.0
+
+Sample:
+  python -m cd_inpainting.sample --ckpt runs/cd_inpainting/ckpt_epoch_43.pt --background_image cd_inpainting/data/train/images/img_0001.png --label_txt cd_inpainting/data/train/labels/img_0001.txt --out_image outputs/out_mask1.png --timesteps 100 --seed 0
+
+Beklenen: tüm görüntü değişir.
+
+9) CMD “More?” Problemi (Windows)
+---------------------------------
+CMD’de satır sonu devam karakteri ^ kullanırken:
+- ^ karakteri satırın EN SONUNDA olmalı
+- ^ sonrasında boşluk olmamalı
+
+En güvenlisi: komutları tek satır yazmak.
+
+10) Paper’a Daha Yakın Sonuç İçin Pratik Öneriler
+-------------------------------------------------
+- Paper small target alan oranı çok küçük: bbox’ları küçük tut (ör. w,h = 0.03–0.08).
+- Daha fazla gerçek görüntü + daha fazla örnek bbox → daha iyi “target görünümü”.
+- Paper’a yakın sampling: timesteps=1000 kullan.
+- Çok az veri ile sadece “çalışıyor mu?” test edilir; kalite için dataset gerekir.
+
+Hazır Komut Özetleri
+--------------------
+Smoke test:
+  python -m cd_inpainting.utils
+
+Train (hızlı test):
+  python -m cd_inpainting.train --images_dir cd_inpainting/data/train/images --labels_dir cd_inpainting/data/train/labels --out_dir runs/cd_inpainting --epochs 1 --batch_size 1 --timesteps 100 --num_workers 0 --seed 42
+
+Train (43 epoch örnek):
+  python -m cd_inpainting.train --images_dir cd_inpainting/data/train/images --labels_dir cd_inpainting/data/train/labels --out_dir runs/cd_inpainting --epochs 43 --batch_size 1 --timesteps 100 --num_workers 0 --seed 42
+
+Sample:
+  mkdir outputs
+  python -m cd_inpainting.sample --ckpt runs/cd_inpainting/ckpt_epoch_43.pt --background_image cd_inpainting/data/train/images/img_0001.png --label_txt cd_inpainting/data/train/labels/img_0001.txt --out_image outputs/out_e43.png --timesteps 100 --seed 0
+
+Mask=0:
+  (label boş)
+  python -m cd_inpainting.sample --ckpt runs/cd_inpainting/ckpt_epoch_43.pt --background_image cd_inpainting/data/train/images/img_0001.png --label_txt cd_inpainting/data/train/labels/img_0001.txt --out_image outputs/out_mask0.png --timesteps 100 --seed 0
+
+Check mask:
+  python check_mask.py
